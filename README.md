@@ -8,7 +8,7 @@ Inductive Proximity Sensor for Wok docking detection: [Sensor](https://www.amazo
 IR Sensor for visitor entering detection: [Sensor](https://www.amazon.com/Digital-Receiver-Transmitter-Electronic-Building/dp/B08X2MFS6S/ref=pd_bxgy_d_sccl_1/134-1341154-4390636?pd_rd_w=IlqpJ&content-id=amzn1.sym.9bef5913-5870-4504-8883-3ba89d7f8e39&pf_rd_p=9bef5913-5870-4504-8883-3ba89d7f8e39&pf_rd_r=M67XN7X84AVRQ2HAGQ43&pd_rd_wg=2H12w&pd_rd_r=b9a84c14-f5fa-4370-b31d-a8ae2348fcfc&pd_rd_i=B08X2MFS6S&th=1)
 
 
-<img src="assets/Passion Project 2026 Summer - Food For Thought  Diagram" alt="Project physical mock up sketch" width="600">
+![Project mock up sketch](assets/Passion Project 2026 Summer - Food For Thought  Diagram.png)
 
 
 ## WOK detection bridge (MVP)
