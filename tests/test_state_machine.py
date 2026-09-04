@@ -1,7 +1,8 @@
 """Unit tests for the hardware-free state machine.
 
-Uses a fake clock and a fake timer scheduler -- no real hardware, no OSC
-server, and no actual sleeping/waiting.
+Debounce and lockout are both timer-based (see state_machine.py), so tests
+drive a fake scheduler directly -- firing or cancelling timers -- instead of
+advancing a fake clock. No real hardware, no OSC server, no actual waiting.
 """
 import pytest
 
@@ -14,23 +15,17 @@ from wok_detection.state_machine import (
 )
 
 
-class FakeClock:
-    def __init__(self, start=0.0):
-        self.now = start
-
-    def advance(self, seconds):
-        self.now += seconds
-
-    def __call__(self):
-        return self.now
-
-
 class FakeScheduler:
-    """Records scheduled timers so tests can fire them manually instead of
-    waiting on a real clock."""
+    """Records scheduled timers so tests can fire or cancel them manually.
+
+    More than one timer can be pending at once now (a debounce timer and an
+    in-flight lockout timer, say) -- `fire_all` fires every pending timer,
+    while `fire_latest` fires only the most recently scheduled one, leaving
+    earlier pending timers (e.g. a lockout already in flight) untouched.
+    """
 
     def __init__(self):
-        self.scheduled = []  # list of (delay_seconds, callback)
+        self.scheduled = []  # list of (handle, delay_seconds, callback), pending only
         self.cancelled = []
 
     def schedule(self, delay_seconds, callback):
@@ -40,10 +35,17 @@ class FakeScheduler:
 
     def cancel(self, handle):
         self.cancelled.append(handle)
+        self.scheduled = [entry for entry in self.scheduled if entry[0] != handle]
 
     def fire_all(self):
-        for _handle, _delay, callback in self.scheduled:
+        pending = list(self.scheduled)
+        self.scheduled.clear()
+        for _handle, _delay, callback in pending:
             callback()
+
+    def fire_latest(self):
+        _handle, _delay, callback = self.scheduled.pop()
+        callback()
 
 
 class FakeOscSender:
@@ -54,14 +56,17 @@ class FakeOscSender:
         self.sent.append(value)
 
 
-def make_machine(clock, scheduler, osc, debounce_seconds=0.05, lockout_seconds=60):
+def make_debouncer(scheduler, on_stable_change, debounce_seconds=0.05, initial_value=WOK_PRESENT):
+    return Debouncer(debounce_seconds, initial_value, on_stable_change, scheduler.schedule, scheduler.cancel)
+
+
+def make_machine(scheduler, osc, debounce_seconds=0.05, lockout_seconds=60):
     return WokStateMachine(
         debounce_seconds=debounce_seconds,
         lockout_seconds=lockout_seconds,
         send_osc=osc,
         schedule_timer=scheduler.schedule,
         cancel_timer=scheduler.cancel,
-        clock=clock,
         initial_logical=WOK_PRESENT,
     )
 
@@ -82,59 +87,85 @@ def test_raw_low_is_wok_absent():
 # --- debounce / jitter rejection (on Debouncer directly) ---------------
 
 
+def test_debouncer_ignores_repeats_of_the_current_stable_value():
+    scheduler = FakeScheduler()
+    changes = []
+    debouncer = make_debouncer(scheduler, changes.append)
+
+    debouncer.update(WOK_PRESENT)
+    debouncer.update(WOK_PRESENT)
+
+    assert scheduler.scheduled == []
+    assert changes == []
+
+
 def test_debouncer_rejects_short_jitter():
-    clock = FakeClock()
-    debouncer = Debouncer(stable_duration_seconds=0.05, initial_value=0, clock=clock)
+    """Real Firmata reports edges, not continuous samples -- a candidate
+    that flips back to the current stable value before its debounce timer
+    fires must be cancelled and never commit."""
+    scheduler = FakeScheduler()
+    changes = []
+    debouncer = make_debouncer(scheduler, changes.append)
 
-    assert debouncer.update(1, now=clock()) is None  # candidate starts
-    clock.advance(0.02)
-    assert debouncer.update(0, now=clock()) is None  # flips back before stable
-    clock.advance(0.02)
-    assert debouncer.update(1, now=clock()) is None  # brief blip, resets candidate timer
-    clock.advance(0.02)
-    # only 0.02s since the last flip to 1 -- not yet stable
-    assert debouncer.update(1, now=clock()) is None
+    debouncer.update(WOK_ABSENT)  # candidate timer scheduled
+    debouncer.update(WOK_PRESENT)  # flips back to stable before timer fires -- cancelled
+    debouncer.update(WOK_ABSENT)  # brief blip again -- new timer scheduled
+    debouncer.update(WOK_PRESENT)  # flips back again -- cancelled again
+
+    assert changes == []
+    assert len(scheduler.cancelled) == 2
+    assert scheduler.scheduled == []
 
 
-def test_debouncer_accepts_after_stable_duration():
-    clock = FakeClock()
-    debouncer = Debouncer(stable_duration_seconds=0.05, initial_value=0, clock=clock)
+def test_debouncer_accepts_after_timer_fires_uninterrupted():
+    scheduler = FakeScheduler()
+    changes = []
+    debouncer = make_debouncer(scheduler, changes.append)
 
-    debouncer.update(1, now=clock())
-    clock.advance(0.05)
-    assert debouncer.update(1, now=clock()) == 1
+    debouncer.update(WOK_ABSENT)
+    scheduler.fire_all()  # simulate the debounce window elapsing, undisturbed
+
+    assert changes == [WOK_ABSENT]
+
+
+def test_repeated_reports_of_the_same_pending_candidate_do_not_restart_the_timer():
+    """A real sensor may report the same new value more than once before it
+    settles -- that must not keep pushing the debounce window out."""
+    scheduler = FakeScheduler()
+    changes = []
+    debouncer = make_debouncer(scheduler, changes.append)
+
+    debouncer.update(WOK_ABSENT)
+    debouncer.update(WOK_ABSENT)
+
+    assert len(scheduler.scheduled) == 1
 
 
 # --- edge detection ------------------------------------------------------
 
 
 def test_transition_to_absent_sends_one_shot_1_and_enters_busy():
-    clock, scheduler, osc = FakeClock(), FakeScheduler(), FakeOscSender()
-    machine = make_machine(clock, scheduler, osc)
+    scheduler, osc = FakeScheduler(), FakeOscSender()
+    machine = make_machine(scheduler, osc)
 
-    machine.feed_logical(WOK_ABSENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_ABSENT, now=clock())
+    machine.feed_logical(WOK_ABSENT)
+    scheduler.fire_all()  # debounce timer fires -> edge accepted -> lockout starts
 
     assert osc.sent == [1]
     assert machine.busy is True
 
 
 def test_transition_to_present_sends_one_shot_0():
-    clock, scheduler, osc = FakeClock(), FakeScheduler(), FakeOscSender()
-    machine = make_machine(clock, scheduler, osc)
+    scheduler, osc = FakeScheduler(), FakeOscSender()
+    machine = make_machine(scheduler, osc)
 
-    # move away from initial WOK_PRESENT first, then back to it
-    machine.feed_logical(WOK_ABSENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_ABSENT, now=clock())
+    machine.feed_logical(WOK_ABSENT)
+    scheduler.fire_all()  # debounce -> edge -> lockout timer now pending
     osc.sent.clear()
-    scheduler.fire_all()  # clear busy so the WOK_PRESENT edge isn't suppressed
-    scheduler.scheduled.clear()
+    scheduler.fire_all()  # lockout timer fires -> busy clears
 
-    machine.feed_logical(WOK_PRESENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_PRESENT, now=clock())
+    machine.feed_logical(WOK_PRESENT)
+    scheduler.fire_all()  # debounce timer fires -> edge accepted
 
     assert osc.sent == [0]
 
@@ -143,40 +174,36 @@ def test_transition_to_present_sends_one_shot_0():
 
 
 def test_transitions_suppressed_while_busy():
-    clock, scheduler, osc = FakeClock(), FakeScheduler(), FakeOscSender()
-    machine = make_machine(clock, scheduler, osc)
+    scheduler, osc = FakeScheduler(), FakeOscSender()
+    machine = make_machine(scheduler, osc)
 
-    machine.feed_logical(WOK_ABSENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_ABSENT, now=clock())
+    machine.feed_logical(WOK_ABSENT)
+    scheduler.fire_all()  # debounce -> edge -> lockout timer now pending
     assert osc.sent == [1]
     assert machine.busy is True
 
     # Wok placed back, then removed again, all while still busy -- both
-    # transitions must be fully ignored, no OSC traffic at all.
-    clock.advance(0.05)
-    machine.feed_logical(WOK_PRESENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_PRESENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_ABSENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_ABSENT, now=clock())
+    # debounce timers must fire without producing any OSC traffic, and the
+    # already-pending lockout timer must be left untouched throughout.
+    machine.feed_logical(WOK_PRESENT)
+    scheduler.fire_latest()  # fires only the WOK_PRESENT debounce timer
+    machine.feed_logical(WOK_ABSENT)
+    scheduler.fire_latest()  # fires only the WOK_ABSENT debounce timer
 
     assert osc.sent == [1]
     assert machine.busy is True
+    assert len(scheduler.scheduled) == 1  # the still-pending lockout timer
 
 
 # --- timer-based unlock ---------------------------------------------------
 
 
 def test_unlock_after_lockout_resumes_normal_edge_behavior():
-    clock, scheduler, osc = FakeClock(), FakeScheduler(), FakeOscSender()
-    machine = make_machine(clock, scheduler, osc, lockout_seconds=60)
+    scheduler, osc = FakeScheduler(), FakeOscSender()
+    machine = make_machine(scheduler, osc, lockout_seconds=60)
 
-    machine.feed_logical(WOK_ABSENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_ABSENT, now=clock())
+    machine.feed_logical(WOK_ABSENT)
+    scheduler.fire_all()  # debounce -> edge -> lockout timer scheduled
     assert machine.busy is True
     assert len(scheduler.scheduled) == 1
     assert scheduler.scheduled[0][1] == 60
@@ -185,25 +212,38 @@ def test_unlock_after_lockout_resumes_normal_edge_behavior():
     assert machine.busy is False
 
     # fresh edge after unlock is handled normally again
-    machine.feed_logical(WOK_PRESENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_PRESENT, now=clock())
+    machine.feed_logical(WOK_PRESENT)
+    scheduler.fire_all()  # debounce timer fires -> edge accepted
     assert osc.sent == [1, 0]
 
 
 def test_shutdown_cancels_pending_lockout_timer():
-    clock, scheduler, osc = FakeClock(), FakeScheduler(), FakeOscSender()
-    machine = make_machine(clock, scheduler, osc)
+    scheduler, osc = FakeScheduler(), FakeOscSender()
+    machine = make_machine(scheduler, osc)
 
-    machine.feed_logical(WOK_ABSENT, now=clock())
-    clock.advance(0.05)
-    machine.feed_logical(WOK_ABSENT, now=clock())
+    machine.feed_logical(WOK_ABSENT)
+    scheduler.fire_all()  # debounce -> edge -> lockout timer scheduled
     assert machine.busy is True
+    assert len(scheduler.scheduled) == 1
 
     machine.shutdown()
 
     assert len(scheduler.cancelled) == 1
-    assert scheduler.cancelled[0] == scheduler.scheduled[0][0]
+    assert scheduler.scheduled == []
+
+
+def test_shutdown_cancels_pending_debounce_timer():
+    scheduler, osc = FakeScheduler(), FakeOscSender()
+    machine = make_machine(scheduler, osc)
+
+    machine.feed_logical(WOK_ABSENT)  # debounce timer scheduled, not yet fired
+    assert len(scheduler.scheduled) == 1
+
+    machine.shutdown()
+
+    assert len(scheduler.cancelled) == 1
+    assert scheduler.scheduled == []
+    assert osc.sent == []  # never fired, so never sent
 
 
 if __name__ == "__main__":

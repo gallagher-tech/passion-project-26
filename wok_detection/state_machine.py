@@ -1,10 +1,23 @@
-"""Hardware-free state machine: polarity inversion, debounce, edges, busy/lockout.
+"""Hardware-free state machine: polarity inversion, timer-based debounce,
+edges, busy/lockout.
 
-No Firmata or OSC imports here on purpose -- this module is exercised in tests
-with fake pin-state sequences, a fake clock, and a fake timer scheduler.
+No Firmata or OSC imports here on purpose -- this module is exercised in
+tests with fake pin-state sequences, a fake OSC sender, and a fake timer
+scheduler.
+
+Debounce is timer-based, not poll-based: real Firmata digital reporting is
+edge-triggered (StandardFirmata sends a report only when a port's value
+actually changes -- `samplingOn()`'s interval governs analog sampling, not
+digital), so this can be called just once per real transition rather than
+continuously while a value holds steady. A poll-based debouncer (accepting
+a candidate once `now - candidate_since >= stable_duration` on a later call)
+can never fire under that access pattern, since every call's `candidate`
+just changed and its own elapsed time is always ~0. Scheduling an actual
+timer per candidate, and cancelling it if a competing value shows up before
+it fires, works correctly regardless of how often (or rarely) `update()` is
+called while a value is held.
 """
 import logging
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -24,34 +37,60 @@ def raw_to_logical(raw_value):
 
 
 class Debouncer:
-    """Requires a value to be stable for `stable_duration_seconds` before
-    accepting it, and reports only actual changes (i.e. also acts as the
-    edge detector on the debounced signal)."""
+    """Accepts a value only after it has held for `stable_duration_seconds`
+    uninterrupted, using an injected timer rather than polling elapsed time.
 
-    def __init__(self, stable_duration_seconds, initial_value, clock=time.monotonic):
+    `on_stable_change(value)` is called once a candidate survives the full
+    debounce window without a competing value showing up first. A report of
+    the current stable value cancels any in-flight competing candidate (a
+    glitch that reversed itself); a repeated report of the same in-flight
+    candidate is a no-op (it must not keep pushing the window out).
+    """
+
+    def __init__(
+        self,
+        stable_duration_seconds,
+        initial_value,
+        on_stable_change,
+        schedule_timer,
+        cancel_timer,
+    ):
         self._stable_duration = stable_duration_seconds
-        self._clock = clock
+        self._on_stable_change = on_stable_change
+        self._schedule_timer = schedule_timer
+        self._cancel_timer = cancel_timer
         self._stable_value = initial_value
-        self._candidate_value = initial_value
-        self._candidate_since = None
+        self._pending_value = None
+        self._pending_timer = None
 
-    def update(self, raw_value, now=None):
-        """Feed a new raw reading. Returns the new stable value if a debounced
-        transition just occurred, otherwise None."""
-        now = self._clock() if now is None else now
+    def update(self, raw_value):
+        """Feed a new raw reading -- may be called once per real transition
+        or many times while a value holds; both are handled correctly."""
+        if raw_value == self._stable_value:
+            self._cancel_pending()
+            return
 
-        if raw_value != self._candidate_value:
-            self._candidate_value = raw_value
-            self._candidate_since = now
+        if raw_value == self._pending_value:
+            return  # already debouncing toward this value -- let it run
 
-        if self._candidate_value == self._stable_value:
-            return None
+        self._cancel_pending()
+        self._pending_value = raw_value
+        self._pending_timer = self._schedule_timer(self._stable_duration, self._commit)
 
-        if now - self._candidate_since >= self._stable_duration:
-            self._stable_value = self._candidate_value
-            return self._stable_value
+    def _commit(self):
+        self._stable_value = self._pending_value
+        self._pending_value = None
+        self._pending_timer = None
+        self._on_stable_change(self._stable_value)
 
-        return None
+    def _cancel_pending(self):
+        if self._pending_timer is not None:
+            self._cancel_timer(self._pending_timer)
+            self._pending_timer = None
+            self._pending_value = None
+
+    def shutdown(self):
+        self._cancel_pending()
 
 
 class WokStateMachine:
@@ -69,10 +108,15 @@ class WokStateMachine:
         send_osc,
         schedule_timer,
         cancel_timer=None,
-        clock=time.monotonic,
         initial_logical=WOK_PRESENT,
     ):
-        self._debouncer = Debouncer(debounce_seconds, initial_logical, clock=clock)
+        self._debouncer = Debouncer(
+            debounce_seconds,
+            initial_logical,
+            self._on_debounced_transition,
+            schedule_timer,
+            cancel_timer,
+        )
         self._lockout_seconds = lockout_seconds
         self._send_osc = send_osc
         self._schedule_timer = schedule_timer
@@ -84,14 +128,11 @@ class WokStateMachine:
     def busy(self):
         return self._busy
 
-    def feed_raw(self, raw_value, now=None):
-        self.feed_logical(raw_to_logical(raw_value), now=now)
+    def feed_raw(self, raw_value):
+        self.feed_logical(raw_to_logical(raw_value))
 
-    def feed_logical(self, logical_value, now=None):
-        changed = self._debouncer.update(logical_value, now=now)
-        if changed is None:
-            return
-        self._on_debounced_transition(changed)
+    def feed_logical(self, logical_value):
+        self._debouncer.update(logical_value)
 
     def _on_debounced_transition(self, new_logical_value):
         if self._busy:
@@ -120,6 +161,7 @@ class WokStateMachine:
         self._timer_handle = None
 
     def shutdown(self):
+        self._debouncer.shutdown()
         if self._timer_handle is not None and self._cancel_timer is not None:
             self._cancel_timer(self._timer_handle)
             self._timer_handle = None

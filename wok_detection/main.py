@@ -14,7 +14,8 @@ from wok_detection.state_machine import WOK_PRESENT, WokStateMachine
 
 # Sole driver of the `busy` lockout window (see README). Trivial to find and
 # adjust on-site without digging through the rest of the script.
-LOCKOUT_DURATION_SECONDS = 60
+# TEMP: dropped to 1s for bench-testing sensor->MadMapper end to end -- restore to 60 when done.
+LOCKOUT_DURATION_SECONDS = 1
 
 
 def parse_args():
@@ -29,13 +30,24 @@ def parse_args():
         help="Firmata sampling interval in ms (default: 19, pyfirmata2's own default)",
     )
     parser.add_argument("--osc-host", default="127.0.0.1", help="MadMapper OSC listen host (default: 127.0.0.1)")
-    parser.add_argument("--osc-port", type=int, default=8000, help="MadMapper OSC listen port (default: 8000)")
+    parser.add_argument("--osc-port", type=int, default=8010, help="MadMapper OSC listen port (default: 8010)")
     parser.add_argument("--osc-address", default="/video", help="OSC address (default: /video)")
     parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity (default: INFO)",
+    )
+    parser.add_argument(
+        "--raw-log",
+        action="store_true",
+        help=(
+            "Log every raw Firmata pin sample when it changes, before debouncing "
+            "(logged at INFO, so it shows up regardless of --log-level). Useful "
+            "for confirming the sensor is actually being read during hardware "
+            "bring-up. Off by default -- the pin is sampled ~50x/sec, so this "
+            "would otherwise be noisy even though most samples don't change."
+        ),
     )
     return parser.parse_args()
 
@@ -70,11 +82,23 @@ def main():
         initial_logical=WOK_PRESENT,
     )
 
+    on_raw_value = state_machine.feed_raw
+    if args.raw_log:
+        raw_logger = logging.getLogger("wok_detection.raw")
+        last_raw_value = None
+
+        def on_raw_value(raw_value):
+            nonlocal last_raw_value
+            if raw_value != last_raw_value:
+                raw_logger.info("raw pin value changed -> %s", raw_value)
+                last_raw_value = raw_value
+            state_machine.feed_raw(raw_value)
+
     firmata_input = FirmataDigitalInput(
         port=args.port,
         pin=args.pin,
         sampling_interval_ms=args.sampling_interval_ms,
-        on_raw_value=state_machine.feed_raw,
+        on_raw_value=on_raw_value,
     )
 
     stop_event = threading.Event()

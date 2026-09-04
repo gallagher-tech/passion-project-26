@@ -99,7 +99,7 @@ CLI options (all optional except `--port`):
 | `--debounce-ms` | `50` | Debounce duration in ms |
 | `--sampling-interval-ms` | `19` | Firmata sampling interval (pyfirmata2's own default) |
 | `--osc-host` | `127.0.0.1` | MadMapper OSC listen host |
-| `--osc-port` | `8000` | MadMapper OSC listen port |
+| `--osc-port` | `8010` | MadMapper OSC listen port |
 | `--osc-address` | `/video` | OSC address |
 | `--log-level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 
@@ -109,7 +109,7 @@ edit the constant at the top of `wok_detection/main.py` to change it.
 **Defaults flagged for confirmation** -- these were chosen as sensible
 MVP defaults, not confirmed against your actual MadMapper project:
 - Debounce: 50ms
-- OSC out port: 8000 (check MadMapper's Preferences > OSC listen port and
+- OSC out port: 8010 (check MadMapper's Preferences > OSC listen port and
   match it, or pass `--osc-port`)
 - OSC address: `/video`
 
@@ -119,7 +119,7 @@ The bridge sends one OSC address with an integer payload: **1 = video on,
 0 = video off**. On the MadMapper side:
 
 1. Preferences > OSC: confirm the listen port matches `--osc-port`
-   (default `8000`).
+   (default `8010`).
 2. Use **Learn Mode** on the parameter you want to drive (e.g. a cue's
    opacity, or a Logic/Trigger input) and trigger the bridge once (place/
    remove metal from the sensor) to bind `/video`.
