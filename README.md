@@ -30,7 +30,9 @@ tests/
 
 <img src="Assets/Walk%28Wok%29%20In%20Kitchen.jpg" alt="Wok on the sensor burner in front of the projected cooking video" width="600">
 
-<img src="Assets/PassionProject%202026%20Summer%20-%20Documentation.jpg" alt="Visitors interacting with the wok station" width="600">
+<img src="Assets/PassionProject%202026%20Summer%20-%20Documentation.jpg" alt="Summer '26 interns Lia and Ellie playtesting the wok station" width="600">
+
+*Our summer '26 interns, Lia and Ellie, playtesting the interaction before our presentation.*
 
 Visitors lift the wok off the burner prop. The sensor inside the prop picks
 up the change, and the projected cooking video plays on the wall behind the
