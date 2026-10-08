@@ -3,12 +3,90 @@ Passion Project Summer 2026
 
 Working Deck for Passion Project: [Food for Thought](https://docs.google.com/presentation/d/1XBIuHYTtCYXlJKESTd2HzYoy4a99-x0bBDA_emFXVYQ/edit?usp=sharing)
 
-Inductive Proximity Sensor for Wok docking detection: [Sensor](https://www.amazon.com/Haldzemo-Inductive-Proximity-Normally-Detection/dp/B0CLVBGT5P/ref=sr_1_2?crid=2UBGKX6LACQ1Q&dib=eyJ2IjoiMSJ9.Gjubu62P53iDcHwgkeAdtYYbNqUvxSWWoog5DB9grmYjBsZjVqvtxL4lDL-p6S3NpgGWJRPtfRN7DDF8_XArBIJBNafI4zicuwhuNsSfzd3k4jdNFjGb2sB9JLvKkndzNG_xqpAV9OX5NJv9nLebL8-Ie1MNO1JJAqQxd0LAhZaJe_X3CyxBW-tyCjP3cxIDl3UNOiLDpBBgPeiNwJ_AIV6CVDZwlqq11u4j5z6HA20.o2ATch9JANFj03Zw8mqdicduLN5WG9ITe_1aQq1OFt0&dib_tag=se&keywords=inductive+proximity+sensor+arduino&qid=1787590697&sprefix=inductive+proximity+sensor+arduino%2Caps%2C122&sr=8-2#customerReviews)
+Inductive Proximity Sensor for Wok docking detection: [Sensor](https://www.amazon.com/dp/B0CLVBGT5P)
 
-IR Sensor for visitor entering detection: [Sensor](https://www.amazon.com/Digital-Receiver-Transmitter-Electronic-Building/dp/B08X2MFS6S/ref=pd_bxgy_d_sccl_1/134-1341154-4390636?pd_rd_w=IlqpJ&content-id=amzn1.sym.9bef5913-5870-4504-8883-3ba89d7f8e39&pf_rd_p=9bef5913-5870-4504-8883-3ba89d7f8e39&pf_rd_r=M67XN7X84AVRQ2HAGQ43&pd_rd_wg=2H12w&pd_rd_r=b9a84c14-f5fa-4370-b31d-a8ae2348fcfc&pd_rd_i=B08X2MFS6S&th=1)
+IR Sensor for visitor entering detection (optional): [Sensor](https://www.amazon.com/dp/B08X2MFS6S)
 
 
 <img src="Assets/Passion Project 2026 Summer - Food For Thought  Diagram.png" alt="sketch" width="600">
+
+## Repository layout
+
+```
+Arduino/
+  Firmata/StandardFirmata/  # firmware flashed to the Arduino Uno
+  sketch_LED_click/         # early LED test sketch
+Assets/                     # diagram and installation photos
+wok_detection/
+  state_machine.py   # debounce, polarity inversion, edges, busy/lockout -- no hardware/OSC deps
+  firmata_input.py    # pyfirmata2 board/pin setup, feeds raw values into the state machine
+  osc_output.py        # python-osc client wrapper
+  main.py              # CLI, logging, wiring, signal handling (LOCKOUT_DURATION_SECONDS lives here)
+tests/
+  test_state_machine.py
+```
+
+## Installation setup
+
+<img src="Assets/Walk%28Wok%29%20In%20Kitchen.jpg" alt="Wok on the sensor burner in front of the projected cooking video" width="600">
+
+<img src="Assets/PassionProject%202026%20Summer%20-%20Documentation.jpg" alt="Visitors interacting with the wok station" width="600">
+
+Visitors lift the wok off the burner prop. The sensor inside the prop picks
+up the change, and the projected cooking video plays on the wall behind the
+G&A letters. Putting the wok back stops the video once the lockout window has
+passed (see [State machine behavior](#state-machine-behavior)).
+
+### What you need
+
+- **MadMapper license.** Without a license, MadMapper's output is
+  watermarked or limited, so an installation needs a licensed copy.
+- **Computer** to run MadMapper and the Python bridge, with Python 3.12 and
+  a free USB port for the Arduino.
+- **Projector(s)** connected to that computer and mapped in MadMapper. The
+  main one covers the wall behind the burner.
+- **Arduino Uno** flashed with `Arduino/Firmata/StandardFirmata`, plus a USB
+  cable to the computer.
+- **Inductive proximity sensor** mounted inside the burner prop and wired to
+  the Arduino (see [Wiring](#wiring)).
+- **Physical props:** a table, a steel or iron wok, the wooden burner prop
+  that holds the sensor, and the dimensional G&A letters on the projection
+  wall.
+- **IR sensor (optional).** It isn't built into this setup or the bridge
+  code. It's a possible addition for detecting visitors as they walk up to
+  the installation.
+
+### Assumptions
+
+- The room is indoors and can be darkened enough for projection.
+- MadMapper and the bridge run on the **same computer** and talk over OSC on
+  `127.0.0.1:8010`.
+- The Arduino is powered over USB, with no separate power supply.
+- The wok is **ferrous metal** (carbon steel or cast iron) so the inductive
+  sensor can detect it. Aluminum or non-metal pans won't trigger it
+  reliably.
+- The projector(s) are already positioned and aligned with the wall and
+  props in the MadMapper project.
+
+### Startup order
+
+1. Plug the Arduino into the computer over USB.
+2. Find the Arduino's serial port. On Windows it shows up as a `COM`
+   port, and the number depends on the machine and on which USB port you
+   use, so it may be `COM3` on one setup and `COM7` on another. To check:
+   - **Device Manager > Ports (COM & LPT)**: look for "Arduino Uno (COMx)".
+   - **Arduino IDE > Tools > Port**: lists the board with its port.
+   - **PowerShell**: `[System.IO.Ports.SerialPort]::GetPortNames()`
+   
+   If you move the cable to another USB port, check again, because the
+   number can change. Close the Arduino IDE's Serial Monitor first, since
+   only one program can hold the port at a time. On Linux the port is
+   usually `/dev/ttyACM0`.
+3. Open the MadMapper project and check that the OSC listen port matches
+   (see [MadMapper setup](#madmapper-setup)).
+4. Start the bridge with the port you found, e.g.
+   `python -m wok_detection.main --port COM7`.
+5. Lift the wok off the burner and confirm the video starts.
 
 
 ## WOK detection bridge (MVP)
@@ -64,17 +142,9 @@ everywhere else in the code:
    `wok_detection/main.py`, defaulting to **60** seconds. It is the sole
    thing driving `busy` in this version -- nothing clears it early.
 
-### Project layout
+### Code structure
 
-```
-wok_detection/
-  state_machine.py   # debounce, polarity inversion, edges, busy/lockout -- no hardware/OSC deps
-  firmata_input.py    # pyfirmata2 board/pin setup, feeds raw values into the state machine
-  osc_output.py        # python-osc client wrapper
-  main.py              # CLI, logging, wiring, signal handling (LOCKOUT_DURATION_SECONDS lives here)
-tests/
-  test_state_machine.py
-```
+See [Repository layout](#repository-layout) for the full file list.
 
 `state_machine.py` has no Firmata or OSC imports, so it's unit-tested with
 fake pin-state sequences, a fake OSC sender, and a fake clock/timer --  no
@@ -87,8 +157,9 @@ pip install -r requirements.txt
 python -m wok_detection.main --port COM3
 ```
 
-(Use your actual serial port -- e.g. `COM3` on Windows, `/dev/ttyACM0` on
-Linux.)
+(Use your actual serial port, e.g. `COM3` or `COM7` on Windows or
+`/dev/ttyACM0` on Linux. See [Startup order](#startup-order) for how to
+find it.)
 
 CLI options (all optional except `--port`):
 
